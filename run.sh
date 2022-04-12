@@ -8,6 +8,7 @@ cd build
 
 clang ../main.c \
   -g \
+  -I../jerry_install/include \
   -Wall -Werror -Wno-error=unused-function\
   ../minifb/build/libminifb.a \
   ../jerry_build/lib/libjerry-core.a \

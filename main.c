@@ -1,4 +1,5 @@
-#include "jerry_install/include/jerryscript.h"
+#include "jerryscript.h"
+#include "jerryscript-ext/print.h"
 #include "minifb/include/MiniFB.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -69,12 +70,6 @@ static void mat3_mul(Mat3 out, Mat3 a, Mat3 b) {
                              0.0f, 0.0f, 1.0f})
 
 typedef uint8_t Image[32 * 32 * 4];
-typedef enum {
-  ImageKind_NONE,
-  ImageKind_Arrow,
-  ImageKind_Archer,
-  ImageKind_COUNT,
-} ImageKind;
 static void image_load(char *path, uint8_t *img) {
   FILE *f = fopen(path, "r");
   if (f)
@@ -86,14 +81,23 @@ static void image_load(char *path, uint8_t *img) {
 
 typedef struct { float x, y, image; } Sprite;
 
+#define ART() X(arrow ) X(archer) \
+  X(body_s) X(dirt_s) X(head_s) X(tail_s) X(tomato_s) X(turn_s)
+
 #define SPRITE_COUNT (2)
 static struct {
-  Image images[ImageKind_COUNT];
+  Image images[
+    #define X(s) + 1
+    0 ART()
+    #undef X
+  ];
 } rend;
 
 static void render_init(void) {
-  image_load("../arrow.bin", (uint8_t *) (rend.images + ImageKind_Arrow));
-  image_load("../archer.bin", (uint8_t *) (rend.images + ImageKind_Archer));
+  Image *img = rend.images;
+#define X(s) image_load("../art/" #s ".bin", (uint8_t *) (img++));
+  ART()
+#undef X
 }
 
 static void render_clear(uint32_t *buf) {
@@ -103,7 +107,7 @@ static void render_clear(uint32_t *buf) {
 }
 
 static void render_sprite(uint32_t *buf, Sprite *sprite) {
-  uint8_t *img = rend.images[(size_t) sprite->image];
+  uint8_t *img = rend.images[(size_t) sprite->image - 1];
 
   Mat3 m = mat3_IDENT;
   mat3_translate(m, m, sprite->x, sprite->y);
@@ -138,7 +142,7 @@ static void render(uint32_t *buf, Sprite *sprites) {
   render_clear(buf);
 
   for (Sprite *s = sprites; (s - sprites) < SPRITE_COUNT; s++)
-    if ((size_t) s->image != ImageKind_NONE)
+    if ((size_t) s->image > 0)
       render_sprite(buf, s);
 }
 
@@ -164,47 +168,65 @@ static jerry_value_t js_setAnimHandler(
   return jerry_undefined();
 }
 
-static void js_add_global_func(char *name, jerry_external_handler_t func) {
+/* takes ownership of and frees your value */
+static void js_add_global_var(char *name, jerry_value_t val) {
   jerry_value_t property_name_print = jerry_string_sz(name);
-  jerry_value_t property_value_func =
-    jerry_function_external(func);
   jerry_value_t set_result = jerry_object_set(
     js.glob,
     property_name_print,
-    property_value_func
+    val
   );
 
   if (jerry_value_is_exception(set_result))
-    puts("Failed to add the 'print' property");
+    jerryx_print_unhandled_exception(set_result);
 
   jerry_value_free(set_result);
-  jerry_value_free(property_value_func);
   jerry_value_free(property_name_print);
+  jerry_value_free(val);
 }
 
-static void js_log(jerry_value_t val) {
-  jerry_value_t string_value = jerry_value_to_string(val);
-
-  jerry_char_t buffer[256] = "too big to print!";
-
-  jerry_size_t copied_bytes = jerry_string_to_buffer(
-    string_value,
-    JERRY_ENCODING_UTF8,
-    buffer,
-    sizeof(buffer) - 1
-  );
-  buffer[copied_bytes] = '\0';
-
-  jerry_value_free(string_value);
-
-  puts((char *) buffer);
+static void js_add_global_func(char *name, jerry_external_handler_t func) {
+  js_add_global_var(name, jerry_function_external(func));
 }
 
 static void js_eat_err(jerry_value_t err) {
   if (jerry_value_is_exception(err))
-    puts("js error: "), js_log(jerry_exception_value(err, false));
+    jerryx_print_unhandled_exception(err);
+  else
+    jerry_value_free(err);
+}
 
-  jerry_value_free(err);
+static void js_run_file(char *path) {
+  FILE *f = fopen(path, "r");
+  if (!f) { perror(path); return; };
+
+  fseek(f, 0, SEEK_END);
+  int len = ftell(f);
+  fseek(f, 0, SEEK_SET);
+
+  jerry_char_t *script = malloc(len);
+  fread(script, 1, len, f);
+  fclose(f);
+
+  jerry_value_t src_name = jerry_string_sz(path);
+
+  jerry_value_t parsed_code = jerry_parse(
+    script,
+    len,
+    &((jerry_parse_options_t) {
+      .options = JERRY_PARSE_STRICT_MODE | JERRY_PARSE_HAS_SOURCE_NAME,
+      .source_name = src_name
+    })
+  );
+  free(script);
+
+  if (jerry_value_is_exception(parsed_code))
+    jerryx_print_unhandled_exception(parsed_code);
+
+  js_eat_err(jerry_run(parsed_code));
+
+  jerry_value_free(parsed_code);
+  jerry_value_free(src_name);
 }
 
 static void js_init(void) {
@@ -221,27 +243,15 @@ static void js_init(void) {
   /* add spritepush */
   js_add_global_func("setAnimHandler", js_setAnimHandler);
 
-  /* parse */
-  const jerry_char_t script[] = "let t = 0;"
-                                "setAnimHandler((dt, buf) => {"
-                                "  const sprites = new Float32Array(buf);"
-                                "  sprites[0] = -18;"
-                                "  sprites[1] = (-t * 50) % 200;"
-                                "  sprites[2] = 1;"
-                                "  sprites[3] = -100 + Math.cos(-t) * 50;"
-                                "  sprites[4] = -100 + Math.sin(-t) * 50;"
-                                "  sprites[5] = 2;"
-                                "  t += dt;"
-                                "});";
-  const jerry_length_t script_size = sizeof (script) - 1;
+  /* add sprite variables */
+  int x = 0;
+#define X(s) js_add_global_var(#s, jerry_number(x++));
+  ART()
+#undef X
 
-  jerry_value_t parsed_code = jerry_parse(script, script_size, NULL);
-  if (jerry_value_is_exception(parsed_code))
-    puts("error parsing - TODO: more info here");
-
-  js_eat_err(jerry_run(parsed_code));
-
-  jerry_value_free(parsed_code);
+  /* finally run gamelab/userland code */
+  js_run_file("../Engine.js");
+  js_run_file("../script.js");
 }
 
 static void js_deinit(void) {
