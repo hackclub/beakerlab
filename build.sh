@@ -1,11 +1,9 @@
-#!/bin/bash
-
 if [ ! -d "build" ]; then
  mkdir build
 fi
 
-cd build
-
-clang noise.c minifb/build/libminifb.a quickjs/libquickjs.a -lm \
-  -framework Cocoa -framework QuartzCore \
-  -framework Metal -framework MetalKit && ./a.out
+jerryscript/tools/build.py \
+  --builddir=$(pwd)/jerry_build \
+  --debug --error-messages ON\
+  --cmake-param="-DCMAKE_INSTALL_PREFIX=$(pwd)/jerry_install/"
+make -C $(pwd)/jerry_build install
